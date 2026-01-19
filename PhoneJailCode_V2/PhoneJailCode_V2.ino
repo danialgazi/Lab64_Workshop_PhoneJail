@@ -6,15 +6,15 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Servo.h>
-
+#include <EEPROM.h>
 
 // -------------------- Module Definitions --------------------
 
 // Phone jail states
-typedef enum State_t {
+typedef enum {
   STATE_IDLE,
   STATE_LOCKED
-}
+} State_t;
 State_t currentLockState = STATE_LOCKED;  // Set initial state to locked (prevents accidental unlocking)
 
 // Encoder definitions (TODO: CONFIRM THESE ARE CORRECT)
@@ -48,7 +48,14 @@ unsigned long startTime = 0;               // [ms], global time at start
 bool isTimerRunning = false;      // is the timer running?
 const unsigned long timerIncrement = 60000;      // [ms], how much timer increases/decreases by each scroll
 
-
+// EEPROM stuff
+const uint32_t signature = 0x12345678;        // signature value
+const uint8_t signatureAddr = 0x00;           // address of signature stored in EEPROM
+const uint8_t timeRemainingAddr = 0x10;       // address of timeRemaing variable
+const uint8_t timerDurationAddr = 0x20;       // address of timerDuration variable
+unsigned long lastWriteTime = 0;              // time stamp of last write to EEPROM
+const unsigned long interval = 60000;         // write to EEPROM only every minute
+const unsigned long punishment = 60000 * 60;  // added time for turning it off while running
 
 // -------------------- Function Definitions --------------------
 // State machines and services
@@ -60,6 +67,8 @@ void RunDisplayUpdateService(); // Service, updates display every second
 bool CheckButtonPressed();      // Checks rotary encoder button pressed
 bool CheckTimerExpired();       // Checks if the timer has expired
 
+// EEPROM helper functions
+bool EEPROMInitialized();
 
 // -------------------- MAIN CODE --------------------
 
@@ -68,6 +77,21 @@ void setup() {
   // put your setup code here, to run once:
 
   Serial.begin(9600);
+
+  if (!EEPROMInitialized()) {
+    // first time boards powered up
+    // erase eeprom
+    for (int i = 0; i < EEPROM.length(); i++) {
+      EEPROM.write(i, 0x00);
+    }
+    // write unique signature to eeprom
+    EEPROM.put(signatureAddr, signature);
+  } else {
+    EEPROM.get(timeRemainingAddr, timeRemaining);
+    timeRemaining += punishment;
+    EEPROM.get(timerDurationAddr, timerDuration);
+    currentLockState = STATE_LOCKED;
+  }
 
   // ------ Encoder Setup -------
   // set pins as input with internal pull-up resistors enabled
@@ -102,9 +126,7 @@ void setup() {
   // Make timer text
   display.setTextSize(2);             
   display.setTextColor(SSD1306_WHITE);       // Draw white text
-
 }
-
 
 // LOOP: runs continuously
 void loop() {
@@ -157,7 +179,7 @@ void RunDisplayUpdateService() {
 
     // Declare current and previous display times
     static unsigned long prevDisplaySecond = 0;
-    static unsigned long currentDisplaySecond = timerRemaining / 1000;
+    static unsigned long currentDisplaySecond = timeRemaining / 1000;
 
     // We only want to update the display once per sec
     if (currentDisplaySecond != prevDisplaySecond) {
@@ -236,9 +258,10 @@ void RunLockingSM() {
         // 1. Lock servo
         servo.write(closedAngle);
 
-        // 2. Set start time for timer
+        // 2. Set start time for timer and write time duration to EEPROM
         startTime = millis();
         isTimerRunning = true;
+        EEPROM.put(timerDurationAddr, timerDuration);
 
         // 3. Move to next state
         currentLockState = STATE_LOCKED;
@@ -310,16 +333,34 @@ Outputs: bool
 bool CheckTimerExpired() {
   bool returnVal = false;
 
-  long elapsedTime = millis() - startTime;
+  unsigned long currentTime = millis();
+  long elapsedTime = currentTime - startTime;
 
   // Make sure time remaining is never negative
   if (elapsedTime >= timeRemaining) {
     timeRemaining = 0; // Lower limit is 0
     returnVal = true;
   } else {
-    timeRemaining = timerDuration - elapstedTime;
+    timeRemaining = timerDuration - elapsedTime;
+  }
+
+  // If a minute as elapsed from last write then write to EEPROM
+  if (currentTime - lastWriteTime > interval) {
+    EEPROM.put(timeRemainingAddr, timeRemaining);
+    lastWriteTime = millis();
   }
 
   return returnVal;
-  
+}
+
+/*
+Name: EEPROMInitialized
+Purpose: Checks if EEPROM has been written to before. Returns true if yes, otherwise false.
+Inputs: None
+Outputs: bool
+*/
+bool EEPROMInitialized() {
+  uint32_t val;
+  EEPROM.get(signatureAddr, val);
+  return val == signature;
 }
