@@ -41,6 +41,9 @@ int closedAngle = 90;    // [deg], servo closed angle
 int openAngle = 0;       // [deg], servo open angle
 bool servoState = 0;     // 0 = closed (default), 1 = open
 
+// Encoder change tracking
+uint8_t numEncoderChanges = 0;
+
 // Timer definitions
 volatile unsigned long timerDuration = 0;  // [ms], to update with rotary encoder
 unsigned long timeRemaining = 0;           // [ms], time left in timer
@@ -55,7 +58,7 @@ const uint8_t timeRemainingAddr = 0x10;       // address of timeRemaing variable
 const uint8_t timerDurationAddr = 0x20;       // address of timerDuration variable
 unsigned long lastWriteTime = 0;              // time stamp of last write to EEPROM
 const unsigned long interval = 60000;         // write to EEPROM only every minute
-const unsigned long punishment = 60000 * 60;  // added time for turning it off while running
+const unsigned long punishment = 0;  // added time for turning it off while running 60000 * 60
 
 // -------------------- Function Definitions --------------------
 // State machines and services
@@ -75,6 +78,8 @@ bool EEPROMInitialized();
 // SETUP: runs once
 void setup() {
   // put your setup code here, to run once:
+  delay(500);  // pause for a moment so display actually turns on without reset button
+
 
   Serial.begin(9600);
 
@@ -114,11 +119,10 @@ void setup() {
     Serial.println(F("SSD1306 allocation failed"));
     for(;;); // Don't proceed, loop forever
   }
-
+  display.clearDisplay();
   // Show initial display buffer contents on the screen --
   // the library initializes this with an Adafruit splash screen.
   display.display();
-  delay(75); // Pause for 2 seconds
 
   // Clear the buffer
   display.clearDisplay();
@@ -126,12 +130,13 @@ void setup() {
   // Make timer text
   display.setTextSize(2);             
   display.setTextColor(SSD1306_WHITE);       // Draw white text
+
 }
 
 // LOOP: runs continuously
 void loop() {
   // put your main code here, to run repeatedly:
-
+  //display.display();
   // No need to add scrolling service here--it's an interrupt in setup()
   RunDisplayUpdateService();
   RunLockingSM();
@@ -179,7 +184,7 @@ void RunDisplayUpdateService() {
 
     // Declare current and previous display times
     static unsigned long prevDisplaySecond = 0;
-    static unsigned long currentDisplaySecond = timeRemaining / 1000;
+    unsigned long currentDisplaySecond = timeRemaining / 1000;
 
     // We only want to update the display once per sec
     if (currentDisplaySecond != prevDisplaySecond) {
@@ -193,11 +198,11 @@ void RunDisplayUpdateService() {
       display.setTextSize(2);
 
       // Print pre-time message
-      display.setCursor(0, 0);
-      display.println(F("Remaining:"));
+      display.setCursor(10, 0);
+      display.println(F("Time Left"));
 
       // Print time remaining in MM:SS
-      display.setCursor(0, 25);
+      display.setCursor(10, 25);
       display.print(minRemaining);
       display.print(":");
       if (secRemaining < 10) display.print("0");  // Add leading 0 for seconds if < 10 sec
@@ -220,11 +225,11 @@ void RunDisplayUpdateService() {
     display.setTextSize(2);
 
     // Print pre-time message
-    display.setCursor(0, 0);
+    display.setCursor(10, 0);
     display.println(F("Set Time:"));
 
     // Print timer duration
-    display.setCursor(0, 25);
+    display.setCursor(10, 25);
     display.print(timerMin);
     display.print("m ");
     display.print(timerSec);
@@ -248,7 +253,7 @@ void RunLockingSM() {
 
   // Run event checkers
   bool isButtonPressed = CheckButtonPressed();
-  bool isTimerRunning = CheckTimerExpired();
+  bool isTimerExpired = CheckTimerExpired();
 
   // State switch case
   switch (currentLockState) {
@@ -257,9 +262,11 @@ void RunLockingSM() {
       if ((isButtonPressed == true) && (timerDuration > 0)) {
         // 1. Lock servo
         servo.write(closedAngle);
+        // Serial.println("here");
 
         // 2. Set start time for timer and write time duration to EEPROM
         startTime = millis();
+        timeRemaining = timerDuration;
         isTimerRunning = true;
         EEPROM.put(timerDurationAddr, timerDuration);
 
@@ -269,7 +276,8 @@ void RunLockingSM() {
       break;
     
     case STATE_LOCKED:
-      if (!isTimerRunning) {
+      if (isTimerExpired) {
+        Serial.println("got");
         // 1. Unlock servo
         servo.write(openAngle);
 
@@ -337,7 +345,7 @@ bool CheckTimerExpired() {
   long elapsedTime = currentTime - startTime;
 
   // Make sure time remaining is never negative
-  if (elapsedTime >= timeRemaining) {
+  if (timeRemaining <= 0) {
     timeRemaining = 0; // Lower limit is 0
     returnVal = true;
   } else {
