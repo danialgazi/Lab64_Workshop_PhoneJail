@@ -15,7 +15,7 @@ typedef enum {
   STATE_IDLE,
   STATE_LOCKED
 } State_t;
-State_t currentLockState = STATE_LOCKED;  // Set initial state to locked (prevents accidental unlocking)
+volatile State_t currentLockState = STATE_LOCKED;  // Set initial state to locked (prevents accidental unlocking)
 
 // Encoder definitions (TODO: CONFIRM THESE ARE CORRECT)
 #define PIN_ENCODER_A 2     // A
@@ -40,9 +40,6 @@ Servo servo;
 int closedAngle = 90;    // [deg], servo closed angle
 int openAngle = 0;       // [deg], servo open angle
 bool servoState = 0;     // 0 = closed (default), 1 = open
-
-// Encoder change tracking
-uint8_t numEncoderChanges = 0;
 
 // Timer definitions
 volatile unsigned long timerDuration = 0;  // [ms], to update with rotary encoder
@@ -83,20 +80,20 @@ void setup() {
 
   Serial.begin(9600);
 
-  if (!EEPROMInitialized()) {
-    // first time boards powered up
-    // erase eeprom
-    for (int i = 0; i < EEPROM.length(); i++) {
-      EEPROM.write(i, 0x00);
-    }
-    // write unique signature to eeprom
-    EEPROM.put(signatureAddr, signature);
-  } else {
-    EEPROM.get(timeRemainingAddr, timeRemaining);
-    timeRemaining += punishment;
-    EEPROM.get(timerDurationAddr, timerDuration);
-    currentLockState = STATE_LOCKED;
-  }
+  // if (!EEPROMInitialized()) {
+  //   // first time boards powered up
+  //   // erase eeprom
+  //   for (int i = 0; i < EEPROM.length(); i++) {
+  //     EEPROM.write(i, 0x00);
+  //   }
+  //   // write unique signature to eeprom
+  //   EEPROM.put(signatureAddr, signature);
+  // } else {
+  //   EEPROM.get(timeRemainingAddr, timeRemaining);
+  //   timeRemaining += punishment;
+  //   EEPROM.get(timerDurationAddr, timerDuration);
+  //   currentLockState = STATE_LOCKED;
+  // }
 
   // ------ Encoder Setup -------
   // set pins as input with internal pull-up resistors enabled
@@ -154,20 +151,37 @@ Outputs: None
 */
 void RunScrollingService() {
 
-  // Check current encoder pin states
-  bool A_state = digitalRead(PIN_ENCODER_A);
-  bool B_state = digitalRead(PIN_ENCODER_B);
+  // Time delay debounce
+  static unsigned long prevInterruptTime = 0;
+  unsigned long interruptTime = millis();
 
-  // Timer duration can only change when device is in idle state
-  if (currentLockState == STATE_IDLE) {
-    if (A_state == B_state) {
-      // Make sure timer doesn't go negative
-      if (timerDuration > 0) {
-        timerDuration -= timerIncrement;    // Reduce time
+  if (interruptTime - prevInterruptTime > 5) {  // Prevent wiggling
+    // Check current encoder pin states
+    bool A_state = digitalRead(PIN_ENCODER_A);
+    bool B_state = digitalRead(PIN_ENCODER_B);
+
+    // Encoder change tracking
+    static bool prevEncA = 0;      // Track previous encoder A value
+    static bool prevEncB = 0;      // Track previous encoder B value
+
+    // Timer duration can only change when device is in idle state
+    if (currentLockState == STATE_IDLE) {
+      if (A_state == LOW) {   // Prevent double counting
+        if (A_state == B_state) {
+          // Make sure timer doesn't go negative
+          if (timerDuration > 0) {
+            timerDuration -= timerIncrement;    // Reduce time
+          }
+        } else {
+          timerDuration += timerIncrement;    // Increase time
+        }
       }
-    } else {
-      timerDuration += timerIncrement;    // Increase time
+      prevInterruptTime = interruptTime;
     }
+
+    // Reset previous encoder values to current ones
+    prevEncA = A_state;
+    prevEncB = B_state;
   }
 }
 
@@ -217,27 +231,39 @@ void RunDisplayUpdateService() {
 
   } else {                  // Update display when scrolling
 
-    int timerMin = timerDuration / 60000;
-    int timerSec = (timerDuration % 60000) / 1000;
+    static unsigned long prevTimerDuration = 0;
 
-    // Format display
-    display.clearDisplay();
-    display.setTextSize(2);
+    // *** PAUSE INTERRUPTS ***
+    noInterrupts();
+    unsigned long safeTimerDuration = timerDuration;
+    interrupts();
+    // *** RESUME INTERRUPTS ***
 
-    // Print pre-time message
-    display.setCursor(10, 0);
-    display.println(F("Set Time:"));
+    if (prevTimerDuration != safeTimerDuration || ((prevTimerDuration == 0) && (safeTimerDuration == 0))) {
+      int timerMin = safeTimerDuration / 60000;
+      int timerSec = (safeTimerDuration % 60000) / 1000;
 
-    // Print timer duration
-    display.setCursor(10, 25);
-    display.print(timerMin);
-    display.print("m ");
-    display.print(timerSec);
-    display.print("s");
+      // Format display
+      display.clearDisplay();
+      display.setTextSize(2);
 
-    // Display the time
-    display.display();
-    
+      // Print pre-time message
+      display.setCursor(10, 0);
+      display.println(F("Set Time:"));
+
+      // Print timer duration
+      display.setCursor(10, 25);
+      display.print(timerMin);
+      display.print("m ");
+      display.print(timerSec);
+      display.print("s");
+
+      // Display the time
+      display.display();
+
+      // Reset previous timer variable
+      prevTimerDuration = safeTimerDuration;
+    }
   }
 
 }
@@ -342,7 +368,7 @@ bool CheckTimerExpired() {
   bool returnVal = false;
 
   unsigned long currentTime = millis();
-  long elapsedTime = currentTime - startTime;
+  unsigned long elapsedTime = currentTime - startTime;
 
   // Make sure time remaining is never negative
   if (timeRemaining <= 0) {
